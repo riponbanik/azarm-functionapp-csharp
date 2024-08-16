@@ -1,0 +1,101 @@
+# Starter pipeline
+
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger:
+- master
+
+pool:
+  vmImage: windows-latest
+
+variables:
+  - group: azconnect
+
+stages:
+- stage: 'Build'
+  displayName: 'Build Package'
+  jobs: 
+  - job: 'Build'
+    displayName: 'Build job'
+    steps:
+    - task: UseDotNet@2
+      displayName: 'Install .NET Core SDK'
+      inputs:
+        version: 8.x
+        performMultiLevelLookup: true
+        includePreviewVersions: true # Required for preview versions
+    - task: DotNetCoreCLI@2
+      inputs:
+        command: 'restore'
+        projects: '**/*.csproj'
+        feedsToUse: 'select'
+      displayName: 'dotnet restore'  
+    - task: DotNetCoreCLI@2
+      inputs:
+        command: 'build'
+        projects: '**/*.csproj'
+      displayName: 'dotnet build'
+    - task: DotNetCoreCLI@2
+      inputs:
+        command: 'publish'
+        publishWebProjects: false
+        projects: '**/*.csproj'
+        arguments: '--no-restore --configuration Release --output $(Build.ArtifactStagingDirectory)'
+      displayName: 'dotnet publish'  
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'drop'
+        publishLocation: 'Container'
+      displayName: 'Publish Artifact: drop'
+    - publish: Templates
+      artifact: Templates
+      displayName: 'Publish Pipeline Artifact: ARM Templates'
+
+- stage: 'Environment'
+  displayName: 'Setup environment'
+  dependsOn: Build
+  condition:  succeeded()
+  jobs:
+    - job: 'DevEnv'
+      displayName: 'Dev Environment'
+      steps:
+        - download: current
+          artifact: Templates
+          displayName: 'Download Pipeline Artifact: ARM Templates'
+        - task: AzureResourceManagerTemplateDeployment@3
+          inputs:
+            deploymentScope: 'Resource Group'
+            azureResourceManagerConnection: '$(dev-connect-name)'
+            subscriptionId: '$(dev-connect-id)'
+            action: 'Create Or Update Resource Group'
+            resourceGroupName: '$(dev-rg-name)'
+            location: 'Australia East'
+            templateLocation: 'Linked artifact'
+            csmFile: '$(Pipeline.Workspace)/Templates/functionapp.json'
+            csmParametersFile: '$(Pipeline.Workspace)/Templates/functionapp.parameters.json'
+            deploymentMode: 'Incremental'
+
+- stage: 'Deploy'
+  displayName: 'Deploy to environment'
+  dependsOn: Environment
+  condition:  succeeded()
+  jobs:
+    - job: 'DevDeploy'
+      displayName: 'Dev Deployment'
+      steps:
+      - task: DownloadBuildArtifacts@0
+        inputs:
+          buildType: 'current'
+          downloadType: 'single'
+          artifactName: 'drop'
+          downloadPath: '$(System.ArtifactsDirectory)'
+      - task: AzureFunctionApp@2
+        inputs:
+          connectedServiceNameARM: '$(dev-connect-name)'
+          appType: 'functionApp'
+          appName: 'RBCSharpProj'
+          package: '$(System.ArtifactsDirectory)/drop/*.zip'
+          deploymentMethod: 'zipDeploy'
